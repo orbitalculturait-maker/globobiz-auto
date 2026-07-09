@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <title>Gloobobiz Automation</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-icon">📞</div>
+      <div class="brand-text"><span class="brand-name">Gloobobiz</span><span class="brand-sub">Automation</span></div>
+    </div>
+    <nav class="sidebar-nav">
+      <button class="nav-item active" data-tab="dashboard">Dashboard Mensile</button>
+      <button class="nav-item" data-tab="schedule">Piano Excel</button>
+      <button class="nav-item" data-tab="settings">Impostazioni</button>
+      <button class="nav-item" data-tab="history">Storico</button>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="cron-badge">
+        <div class="cron-dot" style="background:var(--warn); box-shadow:0 0 6px var(--warn);"></div>
+        <span>Modalità Mensile Manuale</span>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main-content">
+    <!-- DASHBOARD -->
+    <section class="tab-panel active" id="tab-dashboard">
+      <div class="page-header">
+        <h1>Invia Pianificazione a Gloobobiz</h1>
+      </div>
+      <div class="alert alert-error hidden" id="alertError"><div class="alert-icon">❌</div><div class="alert-body"><p id="alertErrorMsg"></p></div></div>
+      <div class="alert alert-success hidden" id="alertSuccess"><div class="alert-icon">✅</div><div class="alert-body"><p id="alertSuccessMsg"></p></div></div>
+
+      <div class="card" style="margin-bottom: 32px;">
+        <h2 class="settings-card-title">Configurazione Massiva</h2>
+        <p class="settings-desc">Seleziona il mese da inviare a Gloobobiz. Lo script configurerà automaticamente i 31 giorni del mese selezionato sostituendo la programmazione corrente.</p>
+        <div style="display: flex; gap: 16px; align-items: center; margin-top: 24px;">
+          <select id="meseSelector" class="input-month" style="width: 200px; padding: 10px;">
+            <option value="">Caricamento mesi...</option>
+          </select>
+          <button class="btn btn-primary" id="btnRunMonth" onclick="runMonth()">
+            ▶ Invia Mese a Gloobobiz
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- PIANO TURNI -->
+    <section class="tab-panel" id="tab-schedule">
+      <div class="page-header">
+        <h1>Piano Excel Completo</h1>
+        <div class="header-filters">
+          <select id="filtroMese" class="input-month">
+            <!-- Mesi verranno popolati qui -->
+          </select>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="turni-table">
+          <thead>
+            <tr>
+              <th>Data</th><th>Giorno</th><th>Fascia 9:00 - 18:00</th><th>Fascia 18:00 - 22:00</th><th>Stato Dati</th>
+            </tr>
+          </thead>
+          <tbody id="tbodyCompleta">
+            <tr><td colspan="5" class="empty-row">Caricamento…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- IMPOSTAZIONI -->
+    <section class="tab-panel" id="tab-settings">
+      <div class="page-header"><h1>Impostazioni di Sistema</h1></div>
+      
+      <div class="cards-row">
+        <!-- Upload -->
+        <div class="card settings-card">
+          <div class="settings-card-title">📄 File Excel Turni</div>
+          <div class="settings-desc">Carica il file Excel con i turni. Deve contenere 1 o più fogli con la struttura standard (Data, Giorno, Diurno, Serale).</div>
+          <div class="upload-zone" id="uploadZone">
+            <div class="upload-icon">📂</div>
+            <div class="upload-text">Clicca o trascina il file Excel qui</div>
+            <div class="upload-sub" id="uploadSub">Nessun file caricato</div>
+          </div>
+          <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none" onchange="uploadFile(this)" />
+          <div class="upload-result hidden" id="uploadResult"></div>
+        </div>
+
+        <!-- API Test -->
+        <div class="card settings-card">
+          <div class="settings-card-title">🔌 Connessione Gloobobiz</div>
+          <div class="settings-desc">Verifica la connessione con le API di Gloobobiz e controlla i parametri del Numero Virtuale configurato.</div>
+          
+          <div class="vn-info" id="vnInfo" style="margin-bottom: 24px;"></div>
+          
+          <button class="btn btn-secondary" id="btnTestApi" onclick="testApi()">Testa Connessione</button>
+          <div class="test-result hidden" id="testResult"></div>
+        </div>
+      </div>
+
+      <!-- Operatori -->
+      <div class="card settings-card">
+        <div class="settings-card-title">👥 Operatori e Destinazioni Configurate</div>
+        <div class="settings-desc">La mappa degli operatori con i relativi ID per l'Account VoIP (1° Inoltro) e Numero Cellulare (2° Inoltro). L'IVR notturno è impostato sull'ID <span id="ivrIdInfo"></span>.</div>
+        <div class="operatori-list" id="operatoriList"></div>
+      </div>
+    </section>
+
+    <!-- STORICO -->
+    <section class="tab-panel" id="tab-history">
+      <div class="page-header">
+        <h1>Storico Operazioni</h1>
+        <button class="btn btn-ghost" onclick="loadHistory()">🔄 Aggiorna</button>
+      </div>
+      <div class="table-wrap">
+        <table class="turni-table">
+          <thead>
+            <tr>
+              <th>Data/Ora Exec</th><th>Tipo</th><th>Giorno Turno</th><th>Fascia</th><th>Operatore</th><th>Esito</th>
+            </tr>
+          </thead>
+          <tbody id="tbodyStorico">
+            <tr><td colspan="6" class="empty-row">Caricamento…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  
+  <script src="app.js"></script>
+</body>
+</html>
