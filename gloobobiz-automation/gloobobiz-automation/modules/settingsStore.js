@@ -2,53 +2,102 @@
  * =====================================================================
  * modules/settingsStore.js
  * =====================================================================
- * Gestisce la persistenza delle impostazioni su file JSON:
- *  - Percorso del file Excel caricato
- *  - Dati aggiuntivi (espandibile)
- *
- * Nota: i numeri di telefono degli operatori sono gestiti direttamente
- * da api.config.js (ID Account VoIP Gloobobiz). Questo store gestisce
- * le impostazioni configurabili dall'utente via UI.
+ * Gestisce la persistenza delle impostazioni e delle configurazioni
+ * modificabili da UI.
  * =====================================================================
  */
 
-const fs   = require('fs');
+const fs = require('fs');
 const path = require('path');
+const config = require('../config/api.config');
 
 const SETTINGS_FILE = path.join(__dirname, '..', 'data', 'settings.json');
 
-// Valori di default (usati se il file non esiste ancora)
+function defaultOperatoriMap() {
+  return Object.fromEntries(
+    Object.entries(config.OPERATORI).map(([nome, op]) => [
+      nome,
+      {
+        username: op.username || '',
+        idVoip: op.idVoip || '',
+        idMobile: op.idMobile || '',
+        aliases: defaultAliasesFor(nome),
+      },
+    ])
+  );
+}
+
+function defaultAliasesFor(nome) {
+  const aliases = {
+    Alessandro: ['ale', 'alessandro'],
+    Gianandrea: ['gianandrea'],
+    Leonardo: ['leo', 'leonardo'],
+  };
+  return aliases[nome] || [nome.toLowerCase()];
+}
+
 const DEFAULT_SETTINGS = {
-  excelFilePath:   null,    // Percorso assoluto al file Excel caricato
-  ultimoUpload:    null,    // Timestamp dell'ultimo upload
-  cronAttivo:      true,    // Il job giornaliero è abilitato?
-  note:            '',      // Note libere dell'utente
+  excelFilePath: null,
+  ultimoUpload: null,
+  cronAttivo: true,
+  note: '',
+  operatoriMap: defaultOperatoriMap(),
 };
 
-/**
- * Legge le impostazioni dal file JSON.
- * @returns {Object} - Impostazioni attuali
- */
+function sanitizeSettings(data = {}) {
+  const merged = {
+    ...DEFAULT_SETTINGS,
+    ...data,
+    operatoriMap: normalizeOperatoriMap(data.operatoriMap || DEFAULT_SETTINGS.operatoriMap),
+  };
+
+  return merged;
+}
+
+function normalizeOperatoriMap(operatoriMap = {}) {
+  const normalized = {};
+
+  for (const [rawNome, op] of Object.entries(operatoriMap || {})) {
+    const nome = String(rawNome || '').trim();
+    if (!nome) continue;
+
+    const aliases = Array.isArray(op?.aliases)
+      ? op.aliases
+      : String(op?.aliases || '')
+          .split(',')
+          .map(v => v.trim())
+          .filter(Boolean);
+
+    normalized[nome] = {
+      username: String(op?.username || '').trim(),
+      idVoip: toNumericOrEmpty(op?.idVoip),
+      idMobile: toNumericOrEmpty(op?.idMobile),
+      aliases: Array.from(new Set([nome.toLowerCase(), ...aliases.map(a => a.toLowerCase())])),
+    };
+  }
+
+  return normalized;
+}
+
+function toNumericOrEmpty(value) {
+  if (value === null || value === undefined || value === '') return '';
+  const cleaned = String(value).trim();
+  return /^\d+$/.test(cleaned) ? Number(cleaned) : cleaned;
+}
+
 function leggiSettings() {
   try {
-    if (!fs.existsSync(SETTINGS_FILE)) return { ...DEFAULT_SETTINGS };
+    if (!fs.existsSync(SETTINGS_FILE)) return sanitizeSettings();
     const raw = fs.readFileSync(SETTINGS_FILE, 'utf8');
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    return sanitizeSettings(JSON.parse(raw));
   } catch (_) {
-    return { ...DEFAULT_SETTINGS };
+    return sanitizeSettings();
   }
 }
 
-/**
- * Salva le impostazioni aggiornate su file.
- * Fa un merge con i valori esistenti (non sovrascrive tutto).
- *
- * @param {Object} nuovi - Oggetto parziale con i campi da aggiornare
- * @returns {Object} - Impostazioni complete dopo il salvataggio
- */
 function salvaSettings(nuovi) {
-  const correnti  = leggiSettings();
-  const aggiornate = { ...correnti, ...nuovi };
+  const correnti = leggiSettings();
+  const aggiornate = sanitizeSettings({ ...correnti, ...nuovi });
 
   const dir = path.dirname(SETTINGS_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -57,4 +106,20 @@ function salvaSettings(nuovi) {
   return aggiornate;
 }
 
-module.exports = { leggiSettings, salvaSettings };
+function listOperatori(settings = leggiSettings()) {
+  return Object.entries(settings.operatoriMap || {}).map(([nome, op]) => ({
+    nome,
+    username: op.username || '',
+    idVoip: op.idVoip || '',
+    idMobile: op.idMobile || '',
+    aliases: Array.isArray(op.aliases) ? op.aliases : [],
+  }));
+}
+
+module.exports = {
+  leggiSettings,
+  salvaSettings,
+  listOperatori,
+  normalizeOperatoriMap,
+  defaultOperatoriMap,
+};

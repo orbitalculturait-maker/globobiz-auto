@@ -2,71 +2,84 @@
  * =====================================================================
  * modules/excelParser.js
  * =====================================================================
- * Legge tutti i fogli del file Excel dei turni di reperibilità e
- * restituisce una mappa indicizzata per data: { "2026-06-01": { diurna, serale } }
- *
- * Gestisce:
- *  - Nomi abbreviati (Ale → Alessandro, leonardo → Leonardo)
- *  - Fogli multipli che coprono periodi diversi
- *  - Righe di riepilogo da ignorare (non contengono date valide)
- *  - Celle vuote → lancia errore descrittivo
+ * Parsing robusto di file Excel/CSV con supporto a:
+ * - fogli multipli
+ * - colonne rilevate da header o fallback classico A/C/D
+ * - nomi operatori normalizzati tramite configurazione utente
+ * - dati incompleti evidenziati ma non scartati
  * =====================================================================
  */
 
-const XLSX = require('xlsx');
+const fs = require('fs');
 const path = require('path');
+const XLSX = require('xlsx');
 
-// -----------------------------------------------------------------------
-// Mappa di normalizzazione nomi: varianti → nome canonico
-// -----------------------------------------------------------------------
-const NOME_CANONICO = {
-  'ale':        'Alessandro',
-  'alessandro': 'Alessandro',
-  'gianandrea': 'Gianandrea',
-  'leonardo':   'Leonardo',
-  'leo':        'Leonardo',
+const FALLBACK_ALIASES = {
+  ale: 'Alessandro',
+  alessandro: 'Alessandro',
+  gianandrea: 'Gianandrea',
+  leo: 'Leonardo',
+  leonardo: 'Leonardo',
 };
 
-/**
- * Normalizza un nome reperibile in modo case-insensitive.
- * @param {string} raw - Valore grezzo dalla cella Excel
- * @returns {string|null} - Nome canonico oppure null se non riconosciuto
- */
-function normalizzaNome(raw) {
-  if (!raw || typeof raw !== 'string') return null;
-  const pulito = raw.trim().toLowerCase();
-  // Cerca corrispondenza esatta o parziale (es. "Tutti tranne..." → null)
-  return NOME_CANONICO[pulito] || null;
+function normalizzaNome(raw, operatoriMap = {}) {
+  if (raw === null || raw === undefined) return null;
+
+  const value = String(raw).trim();
+  if (!value) return null;
+
+  const cleaned = value.toLowerCase().replace(/\s+/g, ' ');
+  const aliasMap = buildAliasMap(operatoriMap);
+  return aliasMap[cleaned] || FALLBACK_ALIASES[cleaned] || null;
 }
 
-/**
- * Converte una data in formato DD/MM/YYYY o serial Excel in stringa ISO YYYY-MM-DD.
- * @param {string|number} valore - Valore della cella Data
- * @returns {string|null} - Data in formato YYYY-MM-DD oppure null
- */
+function buildAliasMap(operatoriMap = {}) {
+  const aliasMap = {};
+
+  for (const [nome, op] of Object.entries(operatoriMap || {})) {
+    aliasMap[nome.toLowerCase()] = nome;
+    const aliases = Array.isArray(op?.aliases)
+      ? op.aliases
+      : String(op?.aliases || '')
+          .split(',')
+          .map(v => v.trim())
+          .filter(Boolean);
+
+    for (const alias of aliases) aliasMap[String(alias).toLowerCase()] = nome;
+  }
+
+  return aliasMap;
+}
+
 function parseData(valore) {
   if (!valore) return null;
 
-  // Caso 1: stringa nel formato DD/MM/YYYY
+  if (valore instanceof Date && !Number.isNaN(valore.getTime())) {
+    return formatDate(valore.getFullYear(), valore.getMonth() + 1, valore.getDate());
+  }
+
   if (typeof valore === 'string') {
-    const match = valore.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-    if (match) {
-      const [, giorno, mese, anno] = match;
-      return `${anno}-${mese.padStart(2,'0')}-${giorno.padStart(2,'0')}`;
+    const trimmed = valore.trim();
+
+    const matchSlash = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (matchSlash) {
+      const [, giorno, mese, anno] = matchSlash;
+      return formatDate(anno, mese, giorno);
     }
+
+    const matchIso = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (matchIso) {
+      const [, anno, mese, giorno] = matchIso;
+      return formatDate(anno, mese, giorno);
+    }
+
     return null;
   }
 
-  // Caso 2: numero seriale Excel (es. 46049 = 01/06/2026)
   if (typeof valore === 'number') {
     try {
       const jsDate = XLSX.SSF.parse_date_code(valore);
-      if (jsDate) {
-        const anno = jsDate.y;
-        const mese = String(jsDate.m).padStart(2, '0');
-        const giorno = String(jsDate.d).padStart(2, '0');
-        return `${anno}-${mese}-${giorno}`;
-      }
+      if (jsDate) return formatDate(jsDate.y, jsDate.m, jsDate.d);
     } catch (_) {}
     return null;
   }
@@ -74,73 +87,150 @@ function parseData(valore) {
   return null;
 }
 
-/**
- * Legge il file Excel e restituisce la mappa completa dei turni.
- *
- * @param {string} filePath - Percorso assoluto al file .xlsx
- * @returns {{ turni: Object, errori: string[] }}
- *   - turni: { "YYYY-MM-DD": { diurna: "Alessandro"|null, serale: "Gianandrea"|null } }
- *   - errori: array di stringhe descrittive per celle vuote o dati anomali
- */
-function parseExcel(filePath) {
+function formatDate(anno, mese, giorno) {
+  return `${String(anno).padStart(4, '0')}-${String(mese).padStart(2, '0')}-${String(giorno).padStart(2, '0')}`;
+}
+
+function findHeaderRow(righe) {
+  const limit = Math.min(righe.length, 8);
+
+  for (let index = 0; index < limit; index += 1) {
+    const row = righe[index] || [];
+    const normalized = row.map(cell => String(cell || '').trim().toLowerCase());
+
+    const hasDate = normalized.some(cell => cell.includes('data'));
+    const hasShift = normalized.some(cell => cell.includes('diurn') || cell.includes('seral') || cell.includes('reper') || cell.includes('9-18') || cell.includes('18-22'));
+
+    if (hasDate && hasShift) return index;
+  }
+
+  return 0;
+}
+
+function detectColumns(headerRow = []) {
+  const normalized = headerRow.map(cell => String(cell || '').trim().toLowerCase());
+
+  const dataIndex = findIndex(normalized, cell => cell.includes('data'));
+  const diurnaIndex = findIndex(normalized, cell => cell.includes('diurn') || cell.includes('9-18') || cell.includes('9:00') || cell.includes('giornata'));
+  const seraleIndex = findIndex(normalized, cell => cell.includes('seral') || cell.includes('reper') || cell.includes('18-22') || cell.includes('18:00'));
+
+  return {
+    dataIndex: dataIndex >= 0 ? dataIndex : 0,
+    diurnaIndex: diurnaIndex >= 0 ? diurnaIndex : 2,
+    seraleIndex: seraleIndex >= 0 ? seraleIndex : 3,
+  };
+}
+
+function findIndex(items, predicate) {
+  for (let i = 0; i < items.length; i += 1) {
+    if (predicate(items[i], i)) return i;
+  }
+  return -1;
+}
+
+function parseCsvRows(filePath) {
+  const content = fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '');
+  const lines = content.split(/\r?\n/).filter(line => line.trim() !== '');
+  if (lines.length === 0) return [];
+
+  const delimiter = detectDelimiter(lines[0]);
+  return lines.map(line => splitCsvLine(line, delimiter));
+}
+
+function detectDelimiter(headerLine) {
+  const commaCount = (headerLine.match(/,/g) || []).length;
+  const semicolonCount = (headerLine.match(/;/g) || []).length;
+  return semicolonCount > commaCount ? ';' : ',';
+}
+
+function splitCsvLine(line, delimiter) {
+  const result = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    const next = line[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === delimiter && !inQuotes) {
+      result.push(current.trim());
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  result.push(current.trim());
+  return result;
+}
+
+function parseWorkbook(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.csv') {
+    return [{ sheetName: 'CSV', righe: parseCsvRows(filePath) }];
+  }
+
   const workbook = XLSX.readFile(filePath);
-  const turni = {};    // mappa data → { diurna, serale }
-  const errori = [];   // lista warning/errori da mostrare in UI
+  return workbook.SheetNames.map(sheetName => ({
+    sheetName,
+    righe: XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: '', raw: true }),
+  }));
+}
 
-  for (const sheetName of workbook.SheetNames) {
-    const ws = workbook.Sheets[sheetName];
-    // Legge il foglio come array di array (raw values), riga 0 = intestazioni
-    const righe = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+function parseExcel(filePath, options = {}) {
+  const turni = {};
+  const errori = [];
+  const operatoriMap = options.operatoriMap || {};
+  const sheets = parseWorkbook(filePath);
 
-    for (let i = 1; i < righe.length; i++) {
-      const riga = righe[i];
+  for (const { sheetName, righe } of sheets) {
+    if (!righe.length) continue;
 
-      // Colonna A: data
-      const dataRaw  = riga[0];
-      // Colonna C: orario lavorativo 9-18 (chi risponde di giorno)
-      const diurnaRaw = riga[2];
-      // Colonna D: reperibilità 18-22 (chi risponde di sera)
-      const seraleRaw = riga[3];
+    const headerRowIndex = findHeaderRow(righe);
+    const columns = detectColumns(righe[headerRowIndex] || []);
+    const startIndex = headerRowIndex + 1;
 
-      // Ignora righe senza data valida (riepilogo, righe vuote, ecc.)
-      const dataISO = parseData(dataRaw);
+    for (let i = startIndex; i < righe.length; i += 1) {
+      const row = righe[i] || [];
+      const dataISO = parseData(row[columns.dataIndex]);
       if (!dataISO) continue;
 
-      // Normalizza i nomi degli operatori
-      const diurna = normalizzaNome(diurnaRaw);
-      const serale  = normalizzaNome(seraleRaw);
+      const diurnaRaw = row[columns.diurnaIndex];
+      const seraleRaw = columns.seraleIndex >= 0 ? row[columns.seraleIndex] : row[columns.diurnaIndex];
 
-      // Raccoglie errori per celle mancanti (solo se la data è >= oggi)
-      const oggi = new Date().toISOString().split('T')[0];
-      if (dataISO >= oggi) {
-        if (!diurna) {
-          errori.push(
-            `⚠️ Fascia 9-18 mancante o non riconosciuta per il ${dataISO} ` +
-            `(foglio: "${sheetName}", valore cella: "${diurnaRaw}")`
-          );
-        }
-        if (!serale) {
-          errori.push(
-            `⚠️ Reperibilità 18-22 mancante o non riconosciuta per il ${dataISO} ` +
-            `(foglio: "${sheetName}", valore cella: "${seraleRaw}")`
-          );
-        }
+      const diurna = normalizzaNome(diurnaRaw, operatoriMap);
+      const serale = normalizzaNome(seraleRaw, operatoriMap) || diurna;
+
+      turni[dataISO] = {
+        diurna: diurna || '',
+        serale: serale || '',
+        fonte: 'file',
+        foglio: sheetName,
+      };
+
+      if (!diurna) {
+        errori.push(`⚠️ Operatore diurno mancante o non riconosciuto per ${dataISO} (foglio: ${sheetName}, valore: "${String(diurnaRaw || '')}")`);
       }
-
-      turni[dataISO] = { diurna, serale };
+      if (!serale) {
+        errori.push(`⚠️ Operatore serale mancante o non riconosciuto per ${dataISO} (foglio: ${sheetName}, valore: "${String(seraleRaw || '')}")`);
+      }
     }
   }
 
   return { turni, errori };
 }
 
-/**
- * Recupera il turno per la data odierna.
- * Lancia un errore se mancano dati essenziali (celle vuote).
- *
- * @param {Object} turni - Mappa restituita da parseExcel()
- * @returns {{ diurna: string, serale: string }} - Nomi degli operatori per oggi
- */
 function getTurnoOggi(turni) {
   const oggi = new Date().toISOString().split('T')[0];
   const turno = turni[oggi];
@@ -149,16 +239,10 @@ function getTurnoOggi(turni) {
     throw new Error(`Nessun turno trovato nel file Excel per la data odierna (${oggi}).`);
   }
   if (!turno.diurna) {
-    throw new Error(
-      `Il file Excel non contiene un operatore valido per la fascia 9-18 del ${oggi}. ` +
-      `Correggi il file e ricaricalo prima di procedere.`
-    );
+    throw new Error(`Il file non contiene un operatore valido per la fascia 9-18 del ${oggi}.`);
   }
   if (!turno.serale) {
-    throw new Error(
-      `Il file Excel non contiene un operatore valido per la reperibilità 18-22 del ${oggi}. ` +
-      `Correggi il file e ricaricalo prima di procedere.`
-    );
+    throw new Error(`Il file non contiene un operatore valido per la fascia 18-22 del ${oggi}.`);
   }
 
   return turno;

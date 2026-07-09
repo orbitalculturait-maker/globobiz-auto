@@ -1,35 +1,37 @@
 const express = require('express');
-const router  = express.Router();
+const router = express.Router();
 
-const { parseExcel }          = require('../modules/excelParser');
-const { testConnessione }     = require('../modules/gloobobizApi');
 const { configuraMeseCompleto } = require('../modules/scheduler');
-const { leggiStorico }        = require('../modules/logger');
-const { leggiSettings }       = require('../modules/settingsStore');
-const config                  = require('../config/api.config');
+const { leggiStorico } = require('../modules/logger');
+const { leggiSettings, salvaSettings, listOperatori, normalizeOperatoriMap } = require('../modules/settingsStore');
+const { testConnessione } = require('../modules/gloobobizApi');
+const { getCurrentMonth, getMonthRows, listMonths, resetMonthRows, saveMonthRows } = require('../modules/scheduleStore');
+const config = require('../config/api.config');
 
 router.get('/status', (req, res) => {
   const settings = leggiSettings();
-  let mesiDisponibili = [];
+  const currentMonth = getCurrentMonth();
   let erroreExcel = null;
 
-  if (settings.excelFilePath) {
-    try {
-      const { turni } = parseExcel(settings.excelFilePath);
-      const mesiSet = new Set();
-      Object.keys(turni).forEach(dataIso => mesiSet.add(dataIso.substring(0, 7)));
-      mesiDisponibili = Array.from(mesiSet).sort();
-    } catch (err) {
-      erroreExcel = err.message;
-    }
+  try {
+    getMonthRows(currentMonth);
+  } catch (err) {
+    erroreExcel = err.message;
   }
 
-  res.json({ ok: true, excelCaricato: !!settings.excelFilePath, mesiDisponibili, erroreExcel });
+  res.json({
+    ok: true,
+    excelCaricato: !!settings.excelFilePath,
+    mesiDisponibili: listMonths(),
+    erroreExcel,
+    currentMonth,
+    ultimoUpload: settings.ultimoUpload,
+  });
 });
 
 router.post('/run-month', async (req, res) => {
-  const { mese } = req.body;
-  if (!mese) return res.status(400).json({ ok: false, errore: 'Mese non specificato' });
+  const mese = req.body?.mese || getCurrentMonth();
+
   try {
     const risultato = await configuraMeseCompleto(mese);
     res.json(risultato);
@@ -39,35 +41,86 @@ router.post('/run-month', async (req, res) => {
 });
 
 router.get('/schedule', (req, res) => {
-  const settings = leggiSettings();
-  if (!settings.excelFilePath) return res.json({ ok: false, turni: {} });
+  const currentMonth = getCurrentMonth();
+  const month = req.query.month || currentMonth;
+
   try {
-    const { turni, errori } = parseExcel(settings.excelFilePath);
-    res.json({ ok: true, turni, errori });
+    const { rows, errori } = getMonthRows(month);
+    res.json({
+      ok: true,
+      month,
+      currentMonth,
+      months: listMonths(),
+      rows,
+      errori,
+      operatorNames: listOperatori().map(op => op.nome),
+    });
   } catch (err) {
     res.status(500).json({ ok: false, errore: err.message });
   }
 });
 
+router.post('/schedule/save', (req, res) => {
+  try {
+    const month = req.body?.month || getCurrentMonth();
+    const saved = saveMonthRows(month, req.body?.rows || []);
+    res.json({ ok: true, messaggio: `Pianificazione del mese ${month} salvata.`, ...saved, month });
+  } catch (err) {
+    res.status(400).json({ ok: false, errore: err.message });
+  }
+});
+
+router.post('/schedule/reset-month', (req, res) => {
+  try {
+    const month = req.body?.month || getCurrentMonth();
+    const result = resetMonthRows(month);
+    res.json({ ok: true, messaggio: `Override manuali rimossi per ${month}.`, ...result, month });
+  } catch (err) {
+    res.status(400).json({ ok: false, errore: err.message });
+  }
+});
+
 router.get('/settings', (req, res) => {
   const settings = leggiSettings();
-  const operatori = Object.values(config.OPERATORI).map(op => ({
-    nome: Object.keys(config.OPERATORI).find(key => config.OPERATORI[key] === op),
-    username: op.username,
-    idVoip: op.idVoip,
-    idMobile: op.idMobile
-  }));
-  res.json({ 
-    ok: true, 
-    settings, 
-    operatori, 
+  res.json({
+    ok: true,
+    settings,
+    operatori: listOperatori(settings),
     virtualNumber: { id: config.ID_VIRTUAL_NUMBER, ddi: '+390550622913' },
-    ivr: config.IVR_NOTTURNO
+    ivr: config.IVR_NOTTURNO,
   });
 });
 
-router.get('/history', (req, res) => res.json({ ok: true, storico: leggiStorico() }));
+router.post('/settings/operators', (req, res) => {
+  try {
+    const rows = Array.isArray(req.body?.operatori) ? req.body.operatori : [];
+    if (rows.length === 0) throw new Error('Inserisci almeno un operatore.');
 
+    const operatoriMap = {};
+    for (const row of rows) {
+      const nome = String(row?.nome || '').trim();
+      if (!nome) throw new Error('Ogni operatore deve avere un nome.');
+      if (operatoriMap[nome]) throw new Error(`Nome duplicato: ${nome}`);
+
+      operatoriMap[nome] = {
+        username: String(row?.username || '').trim(),
+        idVoip: String(row?.idVoip || '').trim(),
+        idMobile: String(row?.idMobile || '').trim(),
+        aliases: String(row?.aliases || '')
+          .split(',')
+          .map(v => v.trim())
+          .filter(Boolean),
+      };
+    }
+
+    const updated = salvaSettings({ operatoriMap: normalizeOperatoriMap(operatoriMap) });
+    res.json({ ok: true, messaggio: 'Operatori aggiornati con successo.', operatori: listOperatori(updated) });
+  } catch (err) {
+    res.status(400).json({ ok: false, errore: err.message });
+  }
+});
+
+router.get('/history', (req, res) => res.json({ ok: true, storico: leggiStorico() }));
 router.post('/test-api', async (req, res) => res.json(await testConnessione()));
 
 module.exports = router;

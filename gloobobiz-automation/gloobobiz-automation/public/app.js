@@ -2,37 +2,71 @@
    app.js — Gloobobiz Automation Frontend
    ===================================================================== */
 
+const appState = {
+  status: null,
+  schedule: null,
+  settings: null,
+};
+
 // --- NAVIGAZIONE ---
 document.querySelectorAll('.nav-item').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    
+
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     const tabId = btn.dataset.tab;
     document.getElementById(`tab-${tabId}`).classList.add('active');
-    
+
     if (tabId === 'dashboard') loadDashboard();
-    if (tabId === 'schedule')  loadSchedule();
-    if (tabId === 'settings')  loadSettings();
-    if (tabId === 'history')   loadHistory();
+    if (tabId === 'schedule') loadSchedule();
+    if (tabId === 'settings') loadSettings();
+    if (tabId === 'history') loadHistory();
   });
 });
 
 // --- UTILITY ---
 function badgeOp(nome) {
   if (!nome || nome.trim() === '') return `<span class="badge-op badge-vuoto">⚠ Mancante</span>`;
-  const p = nome.trim();
-  return `<span class="badge-op badge-${p}">${p}</span>`;
+  return `<span class="badge-op">${escapeHtml(nome)}</span>`;
 }
+
 function fmtTs(iso) {
   if (!iso) return '—';
   return new Date(iso).toLocaleString('it-IT');
 }
+
 function fmtData(iso) {
   if (!iso) return '—';
   const [y, m, d] = iso.split('-');
   return `${d}/${m}/${y}`;
+}
+
+function fmtMonth(ym) {
+  if (!ym) return '—';
+  const [y, m] = ym.split('-');
+  return new Date(Number(y), Number(m) - 1, 1).toLocaleDateString('it-IT', {
+    month: 'long',
+    year: 'numeric',
+  });
+}
+
+function currentMonth() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function getWeekday(iso) {
+  return new Date(`${iso}T12:00:00`).toLocaleDateString('it-IT', { weekday: 'long' });
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
 function mostraErrore(msg) {
@@ -40,177 +74,314 @@ function mostraErrore(msg) {
   document.getElementById('alertError').classList.remove('hidden');
   document.getElementById('alertSuccess').classList.add('hidden');
 }
+
 function mostraSuccesso(msg) {
   document.getElementById('alertSuccessMsg').textContent = msg;
   document.getElementById('alertSuccess').classList.remove('hidden');
   document.getElementById('alertError').classList.add('hidden');
 }
 
+function nascondiAlertPrincipali() {
+  document.getElementById('alertError').classList.add('hidden');
+  document.getElementById('alertSuccess').classList.add('hidden');
+}
+
+function setMonthOptions(select, months = [], preferredMonth = currentMonth()) {
+  const uniqueMonths = Array.from(new Set([preferredMonth, ...months])).sort();
+  select.innerHTML = uniqueMonths.map(month => `<option value="${month}">${fmtMonth(month)}</option>`).join('');
+  select.value = uniqueMonths.includes(preferredMonth) ? preferredMonth : uniqueMonths[0] || preferredMonth;
+}
+
+async function fetchJson(url, options = {}) {
+  const res = await fetch(url, options);
+  const data = await res.json();
+  if (!res.ok || data.ok === false) {
+    throw new Error(data.errore || data.messaggio || 'Operazione non riuscita');
+  }
+  return data;
+}
+
 // --- DASHBOARD ---
 async function loadDashboard() {
   try {
-    const res = await fetch('/api/status');
-    const data = await res.json();
-    
-    const select = document.getElementById('meseSelector');
-    if (data.mesiDisponibili && data.mesiDisponibili.length > 0) {
-      select.innerHTML = data.mesiDisponibili.map(m => `<option value="${m}">${m}</option>`).join('');
-    } else {
-      select.innerHTML = `<option value="">Nessun mese trovato (carica Excel in Impostazioni)</option>`;
-    }
+    const data = await fetchJson('/api/status');
+    appState.status = data;
 
-    if (data.erroreExcel) mostraErrore(data.erroreExcel);
-    else if (!data.excelCaricato) mostraErrore('Nessun file Excel caricato. Vai in Impostazioni.');
-    else {
-      document.getElementById('alertError').classList.add('hidden');
-      document.getElementById('alertSuccess').classList.add('hidden');
+    const preferredMonth = data.currentMonth || currentMonth();
+    setMonthOptions(document.getElementById('meseSelector'), data.mesiDisponibili || [], preferredMonth);
+
+    document.getElementById('currentMonthBadge').textContent = fmtMonth(preferredMonth);
+    document.getElementById('lastUploadInfo').textContent = data.ultimoUpload ? fmtTs(data.ultimoUpload) : 'Nessun file caricato';
+    document.getElementById('sourceStatus').textContent = data.excelCaricato ? 'File presente' : 'Solo tabella interna';
+    document.getElementById('dashboardMeta').textContent = `Mese predefinito: ${fmtMonth(preferredMonth)} · mesi disponibili: ${(data.mesiDisponibili || []).length}`;
+
+    if (data.erroreExcel) {
+      mostraErrore(data.erroreExcel);
+    } else if (!data.excelCaricato) {
+      mostraSuccesso('Puoi già lavorare sul mese corrente dalla tab Piano Turni anche senza file caricato.');
+    } else {
+      nascondiAlertPrincipali();
     }
   } catch (err) {
-    mostraErrore('Errore di connessione al server.');
+    mostraErrore(`Errore di connessione al server: ${err.message}`);
   }
 }
 
 async function runMonth() {
-  const mese = document.getElementById('meseSelector').value;
-  if (!mese) return alert("Seleziona prima un mese!");
-  
+  const mese = document.getElementById('meseSelector').value || currentMonth();
   const btn = document.getElementById('btnRunMonth');
   btn.disabled = true;
-  btn.textContent = "⏳ Invio in corso (richiede alcuni minuti)...";
-  
+  btn.textContent = '⏳ Invio in corso...';
+
   try {
-    const res = await fetch('/api/run-month', {
-      method: 'POST', 
-      headers: { 'Content-Type': 'application/json' }, 
-      body: JSON.stringify({ mese })
+    const data = await fetchJson('/api/run-month', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mese }),
     });
-    const data = await res.json();
-    
-    if (data.ok) mostraSuccesso(data.messaggio);
-    else mostraErrore("Errore durante l'invio: " + data.errore);
+
+    mostraSuccesso(data.messaggio);
   } catch (err) {
-    mostraErrore("Errore di rete: " + err.message);
+    mostraErrore(`Errore durante l'invio: ${err.message}`);
   } finally {
     btn.disabled = false;
-    btn.textContent = "▶ Invia Mese a Gloobobiz";
+    btn.textContent = '▶ Invia mese a Gloobobiz';
   }
 }
 
 // --- PIANO TURNI ---
-async function loadSchedule() {
+async function loadSchedule(monthOverride) {
   const tbody = document.getElementById('tbodyCompleta');
-  tbody.innerHTML = `<tr><td colspan="5" class="empty-row">Caricamento…</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="6" class="empty-row">Caricamento…</td></tr>`;
 
   try {
-    const res = await fetch('/api/schedule');
-    const data = await res.json();
+    const activeMonth = monthOverride || document.getElementById('filtroMese').value || appState.status?.currentMonth || currentMonth();
+    const data = await fetchJson(`/api/schedule?month=${encodeURIComponent(activeMonth)}`);
+    appState.schedule = data;
 
-    if (!data.ok || !data.turni || Object.keys(data.turni).length === 0) {
-      tbody.innerHTML = `<tr><td colspan="5" class="empty-row">Nessun dato disponibile</td></tr>`;
-      return;
-    }
-
-    // Popola select filtri
-    const mesiSet = new Set();
-    Object.keys(data.turni).forEach(d => mesiSet.add(d.substring(0, 7)));
-    const mesi = Array.from(mesiSet).sort();
-    
     const filtro = document.getElementById('filtroMese');
-    filtro.innerHTML = mesi.map(m => `<option value="${m}">${m}</option>`).join('');
-    
-    if (!filtro.value && mesi.length > 0) filtro.value = mesi[0];
+    setMonthOptions(filtro, data.months || [], data.month || activeMonth);
+    filtro.onchange = () => loadSchedule(filtro.value);
 
-    filtro.onchange = () => renderTabella(data.turni, filtro.value, tbody);
-    renderTabella(data.turni, filtro.value, tbody);
-
+    renderScheduleWarnings(data.errori || []);
+    renderTabella(data.rows || [], data.operatorNames || [], tbody);
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="5" class="empty-row">Errore: ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-row">Errore: ${escapeHtml(err.message)}</td></tr>`;
   }
 }
 
-function renderTabella(turni, meseFiltro, tbody) {
-  const righe = Object.entries(turni)
-    .filter(([data]) => data.startsWith(meseFiltro))
-    .sort(([a], [b]) => a.localeCompare(b));
+function renderScheduleWarnings(warnings) {
+  const box = document.getElementById('scheduleWarnings');
+  const msg = document.getElementById('scheduleWarningsMsg');
 
-  if (righe.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="5" class="empty-row">Nessun turno</td></tr>`;
+  if (!warnings || warnings.length === 0) {
+    box.classList.add('hidden');
+    msg.textContent = '';
     return;
   }
 
-  tbody.innerHTML = righe.map(([data, turno]) => {
-    const haProblemi = !turno.diurna || !turno.serale;
-    const stato = haProblemi ? `<span style="color:var(--error)">⚠ Incompleto</span>` : `<span style="color:var(--success)">Pronto</span>`;
-    const d = new Date(data);
-    const giornoNome = d.toLocaleDateString('it-IT', { weekday: 'long' });
+  msg.textContent = warnings.slice(0, 8).join('\n');
+  box.classList.remove('hidden');
+}
+
+function renderTabella(rows, operatorNames, tbody) {
+  if (!rows || rows.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-row">Nessun turno</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = rows.map(row => {
+    const haProblemi = !row.diurna || !row.serale;
+    const stato = haProblemi
+      ? `<span style="color:var(--error)">⚠ Incompleto</span>`
+      : `<span style="color:var(--success)">Pronto</span>`;
 
     return `
-      <tr>
-        <td>${fmtData(data)}</td>
-        <td style="text-transform:capitalize">${giornoNome}</td>
-        <td>${badgeOp(turno.diurna)}</td>
-        <td>${badgeOp(turno.serale)}</td>
+      <tr data-date="${row.data}">
+        <td>${fmtData(row.data)}</td>
+        <td style="text-transform:capitalize">${getWeekday(row.data)}</td>
+        <td>${renderOperatorSelect('diurna', row.diurna, operatorNames)}</td>
+        <td>${renderOperatorSelect('serale', row.serale, operatorNames)}</td>
+        <td><span class="source-pill source-${row.fonte || 'vuoto'}">${formatSource(row.fonte)}</span></td>
         <td>${stato}</td>
       </tr>
     `;
   }).join('');
 }
 
+function formatSource(source) {
+  if (source === 'manuale') return 'Manuale';
+  if (source === 'file') return 'File';
+  return 'Vuoto';
+}
+
+function renderOperatorSelect(field, selectedValue, operatorNames) {
+  const options = [''].concat(operatorNames || []);
+  return `
+    <select class="table-select" data-field="${field}">
+      ${options.map(name => {
+        const label = name || '— Nessuno —';
+        const selected = (name || '') === (selectedValue || '') ? 'selected' : '';
+        return `<option value="${escapeHtml(name)}" ${selected}>${escapeHtml(label)}</option>`;
+      }).join('')}
+    </select>
+  `;
+}
+
+function collectScheduleRows() {
+  return Array.from(document.querySelectorAll('#tbodyCompleta tr[data-date]')).map(tr => ({
+    data: tr.dataset.date,
+    diurna: tr.querySelector('[data-field="diurna"]').value,
+    serale: tr.querySelector('[data-field="serale"]').value,
+  }));
+}
+
+async function saveScheduleMonth() {
+  const month = document.getElementById('filtroMese').value || currentMonth();
+  const rows = collectScheduleRows();
+
+  try {
+    const data = await fetchJson('/api/schedule/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ month, rows }),
+    });
+
+    mostraSuccesso(data.messaggio);
+    await loadDashboard();
+    await loadSchedule(month);
+  } catch (err) {
+    mostraErrore(`Salvataggio non riuscito: ${err.message}`);
+  }
+}
+
+async function resetMonthOverrides() {
+  const month = document.getElementById('filtroMese').value || currentMonth();
+  const confirmed = window.confirm(`Vuoi rimuovere gli override manuali del mese ${fmtMonth(month)}?`);
+  if (!confirmed) return;
+
+  try {
+    const data = await fetchJson('/api/schedule/reset-month', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ month }),
+    });
+
+    mostraSuccesso(data.messaggio);
+    await loadSchedule(month);
+  } catch (err) {
+    mostraErrore(`Reset non riuscito: ${err.message}`);
+  }
+}
+
 // --- IMPOSTAZIONI ---
 async function loadSettings() {
   try {
-    const res = await fetch('/api/settings');
-    const data = await res.json();
-    
-    // File
-    if (data.settings.excelFilePath) {
+    const data = await fetchJson('/api/settings');
+    appState.settings = data;
+
+    if (data.settings?.excelFilePath) {
       document.getElementById('uploadSub').textContent = `✅ ${data.settings.excelFilePath}`;
+    } else {
+      document.getElementById('uploadSub').textContent = 'Nessun file caricato';
     }
 
-    // VN Info
     if (data.virtualNumber) {
       document.getElementById('vnInfo').innerHTML = `
         <div class="vn-field">
-          <span class="vn-label">Numero Virtuale (DDI)</span>
-          <span class="vn-value">${data.virtualNumber.ddi}</span>
+          <span class="vn-label">Numero virtuale (DDI)</span>
+          <span class="vn-value">${escapeHtml(data.virtualNumber.ddi)}</span>
         </div>
         <div class="vn-field">
-          <span class="vn-label">ID Virtuale</span>
-          <span class="vn-value">${data.virtualNumber.id}</span>
+          <span class="vn-label">ID virtuale</span>
+          <span class="vn-value">${escapeHtml(data.virtualNumber.id)}</span>
         </div>
       `;
     }
-    
-    // IVR
-    if (data.ivr) document.getElementById('ivrIdInfo').textContent = data.ivr;
 
-    // Operatori
-    if (data.operatori) {
-      document.getElementById('operatoriList').innerHTML = data.operatori.map(op => `
-        <div class="operatore-item">
-          <div class="op-info">
-            <span class="op-nome badge-op badge-${op.nome}" style="padding:4px 12px">${op.nome}</span>
-            <span class="op-username">${op.username}</span>
-          </div>
-          <div style="display:flex; gap:8px;">
-            <span class="op-id" title="ID VoIP">📞 VoIP: ${op.idVoip}</span>
-            <span class="op-id" title="ID Cellulare">📱 Cell: ${op.idMobile}</span>
-          </div>
-        </div>
-      `).join('');
-    }
+    document.getElementById('ivrIdInfo').textContent = data.ivr || '—';
+    renderOperators(data.operatori || []);
   } catch (err) {
     console.error(err);
+  }
+}
+
+function renderOperators(operatori) {
+  const container = document.getElementById('operatoriList');
+  if (!operatori.length) {
+    container.innerHTML = '<div class="empty-row">Nessun operatore configurato</div>';
+    return;
+  }
+
+  container.innerHTML = operatori.map(op => renderOperatorRow(op)).join('');
+}
+
+function renderOperatorRow(op = {}) {
+  return `
+    <div class="operatore-editor-row">
+      <div class="operator-grid">
+        <label><span>Nome</span><input class="op-input" data-key="nome" value="${escapeHtml(op.nome || '')}" /></label>
+        <label><span>Username</span><input class="op-input" data-key="username" value="${escapeHtml(op.username || '')}" /></label>
+        <label><span>ID VoIP</span><input class="op-input" data-key="idVoip" value="${escapeHtml(op.idVoip || '')}" /></label>
+        <label><span>ID Mobile</span><input class="op-input" data-key="idMobile" value="${escapeHtml(op.idMobile || '')}" /></label>
+        <label class="operator-grid-wide"><span>Alias parser</span><input class="op-input" data-key="aliases" value="${escapeHtml((op.aliases || []).filter(a => a.toLowerCase() !== String(op.nome || '').toLowerCase()).join(', '))}" placeholder="es. ale, aless, leo" /></label>
+      </div>
+      <button class="btn btn-ghost btn-small" onclick="removeOperatorRow(this)">🗑 Rimuovi</button>
+    </div>
+  `;
+}
+
+function addOperatorRow() {
+  const container = document.getElementById('operatoriList');
+  if (container.querySelector('.empty-row')) container.innerHTML = '';
+  container.insertAdjacentHTML('beforeend', renderOperatorRow());
+}
+
+function removeOperatorRow(button) {
+  button.closest('.operatore-editor-row')?.remove();
+  const container = document.getElementById('operatoriList');
+  if (!container.children.length) container.innerHTML = '<div class="empty-row">Nessun operatore configurato</div>';
+}
+
+function collectOperators() {
+  return Array.from(document.querySelectorAll('.operatore-editor-row')).map(row => ({
+    nome: row.querySelector('[data-key="nome"]').value.trim(),
+    username: row.querySelector('[data-key="username"]').value.trim(),
+    idVoip: row.querySelector('[data-key="idVoip"]').value.trim(),
+    idMobile: row.querySelector('[data-key="idMobile"]').value.trim(),
+    aliases: row.querySelector('[data-key="aliases"]').value.trim(),
+  })).filter(op => op.nome);
+}
+
+async function saveOperators() {
+  const operatori = collectOperators();
+
+  try {
+    const data = await fetchJson('/api/settings/operators', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operatori }),
+    });
+
+    mostraSuccesso(data.messaggio);
+    renderOperators(data.operatori || []);
+    await loadSchedule(document.getElementById('filtroMese').value || currentMonth());
+  } catch (err) {
+    mostraErrore(`Salvataggio operatori non riuscito: ${err.message}`);
   }
 }
 
 // Upload Drag & Drop
 const zone = document.getElementById('uploadZone');
 zone.addEventListener('click', () => document.getElementById('fileInput').click());
-zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+zone.addEventListener('dragover', e => {
+  e.preventDefault();
+  zone.classList.add('dragover');
+});
 zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
 zone.addEventListener('drop', e => {
-  e.preventDefault(); zone.classList.remove('dragover');
+  e.preventDefault();
+  zone.classList.remove('dragover');
   if (e.dataTransfer.files[0]) uploadFileObj(e.dataTransfer.files[0]);
 });
 
@@ -228,40 +399,38 @@ async function uploadFileObj(file) {
   fd.append('excel', file);
 
   try {
-    const res = await fetch('/api/upload', { method: 'POST', body: fd });
-    const data = await res.json();
+    const data = await fetchJson('/api/upload/upload', { method: 'POST', body: fd });
+    resultDiv.className = 'upload-result ok';
+    resultDiv.textContent = `✅ ${data.messaggio}${data.warningCount ? ` · warning: ${data.warningCount}` : ''}`;
 
-    if (data.ok) {
-      resultDiv.className = 'upload-result ok';
-      resultDiv.textContent = `✅ ${data.messaggio}`;
-      loadSettings();
-    } else {
-      resultDiv.className = 'upload-result error';
-      resultDiv.textContent = `❌ ${data.errore}`;
-    }
+    await loadSettings();
+    await loadDashboard();
+    await loadSchedule(appState.status?.currentMonth || currentMonth());
   } catch (err) {
     resultDiv.className = 'upload-result error';
-    resultDiv.textContent = `❌ Errore rete: ${err.message}`;
+    resultDiv.textContent = `❌ ${err.message}`;
   }
 }
 
 async function testApi() {
   const btn = document.getElementById('btnTestApi');
   const resDiv = document.getElementById('testResult');
-  btn.disabled = true; btn.textContent = '⏳ Testing...';
-  resDiv.className = 'test-result'; resDiv.classList.remove('hidden');
+  btn.disabled = true;
+  btn.textContent = '⏳ Testing...';
+  resDiv.className = 'test-result';
+  resDiv.classList.remove('hidden');
   resDiv.textContent = 'Connessione in corso...';
-  
+
   try {
-    const res = await fetch('/api/test-api', { method: 'POST' });
-    const data = await res.json();
+    const data = await fetchJson('/api/test-api', { method: 'POST' });
     resDiv.className = `test-result ${data.ok ? 'ok' : 'error'}`;
     resDiv.textContent = (data.ok ? '✅ ' : '❌ ') + data.messaggio;
   } catch (err) {
     resDiv.className = 'test-result error';
     resDiv.textContent = '❌ Errore rete: ' + err.message;
   } finally {
-    btn.disabled = false; btn.textContent = 'Testa Connessione';
+    btn.disabled = false;
+    btn.textContent = 'Testa connessione';
   }
 }
 
@@ -271,8 +440,7 @@ async function loadHistory() {
   tbody.innerHTML = `<tr><td colspan="6" class="empty-row">Caricamento…</td></tr>`;
 
   try {
-    const res = await fetch('/api/history');
-    const data = await res.json();
+    const data = await fetchJson('/api/history');
 
     if (!data.storico || data.storico.length === 0) {
       tbody.innerHTML = `<tr><td colspan="6" class="empty-row">Nessuna operazione registrata</td></tr>`;
@@ -282,18 +450,19 @@ async function loadHistory() {
     tbody.innerHTML = data.storico.map(voce => `
       <tr>
         <td style="font-size:12px;color:var(--text-muted)">${fmtTs(voce.timestamp)}</td>
-        <td><span style="font-size:11px;padding:2px 8px;background:rgba(255,255,255,0.05);border-radius:4px">${voce.tipo}</span></td>
+        <td><span style="font-size:11px;padding:2px 8px;background:rgba(255,255,255,0.05);border-radius:4px">${escapeHtml(voce.tipo)}</span></td>
         <td>${fmtData(voce.data)}</td>
-        <td style="color:var(--text-muted)">${voce.fascia}</td>
+        <td style="color:var(--text-muted)">${escapeHtml(voce.fascia)}</td>
         <td>${badgeOp(voce.operatore)}</td>
         <td class="${voce.successo ? 'esito-ok' : 'esito-error'}">${voce.successo ? '✅ OK' : '❌ Errore'}</td>
       </tr>
     `).join('');
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="6" class="empty-row">Errore: ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-row">Errore: ${escapeHtml(err.message)}</td></tr>`;
   }
 }
 
-window.addEventListener('DOMContentLoaded', () => {
-  loadDashboard();
+window.addEventListener('DOMContentLoaded', async () => {
+  await loadDashboard();
+  await loadSchedule(appState.status?.currentMonth || currentMonth());
 });
