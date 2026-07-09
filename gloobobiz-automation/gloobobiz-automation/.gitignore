@@ -1,0 +1,7 @@
+# File e cartelle da NON committare su Git
+node_modules/
+.env
+data/uploads/
+data/history.json
+data/settings.json
+*.log
