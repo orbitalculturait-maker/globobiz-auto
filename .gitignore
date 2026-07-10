@@ -1,0 +1,9 @@
+node_modules/
+.env
+data/uploads/
+data/backups/
+data/history.json
+data/settings.json
+data/manualSchedule.json
+data/automation.json
+*.log
